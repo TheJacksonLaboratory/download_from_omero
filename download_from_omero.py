@@ -195,7 +195,7 @@ def main():
         cnopts.hostkeys = None
 
         for file in fileList:
-            with pysftp.Connection(host="bhjlk01lp.jax.org", username="jlkinternal",
+            with pysftp.Connection(host="bhjlk01.jax.org", username="jlkinternal",
                                    password="t1m3st4mp!", cnopts=cnopts) as sftp:
                 sftp.cwd("/srv/ftp/images/"+key)
                 sftp.put(file)
