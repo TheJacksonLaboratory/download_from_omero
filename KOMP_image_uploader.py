@@ -21,10 +21,26 @@ import mysql.connector
 from requests import exceptions
 import pysftp
 import collections
+import logging
+from logging.handlers import RotatingFileHandler
 
+import paramiko
+from gevent import monkey
 
 # Press ⌃R to execute it or replace it with your code.
 # Press Double ⇧ to search everywhere for classes, files, tool windows, actions, and settings
+
+
+"""Setup logger"""
+
+logger = logging.getLogger(__name__)
+FORMAT = "[%(asctime)s->%(filename)s->%(funcName)s():%(lineno)s]%(levelname)s: %(message)s"
+logging.basicConfig(format=FORMAT, filemode="w", level=logging.DEBUG, force=True)
+logging_filename = 'App.log'
+handler = RotatingFileHandler(logging_filename, maxBytes=10000000000000, backupCount=10)
+handler.setFormatter(logging.Formatter(FORMAT))
+logger.addHandler(handler)
+
 
 def getDbServer():
     return 'rslims.jax.org'
@@ -76,63 +92,59 @@ def db_init() -> mysql.connector:
     return None
 
 
+def push_to_Server(source: str,
+                   to: str,
+                   localDir: str,
+                   dirName: str) -> None:
+    if not source or to:
+        raise ValueError("No source file or destination")
+
+    cnopts = pysftp.CnOpts()
+    cnopts.hostkeys = None
+    with pysftp.Connection(host="bhjlk01.jax.org", username="jlkinternal",
+                           password="t1m3st4mp!", cnopts=cnopts) as sftp:
+        sftp.cwd("/srv/ftp/images/" + dirName)
+        # localPath = path + "/" + file
+        remotePath = "/srv/ftp/images/" + dirName + source.split("/")[-1]
+        logger.info(f"Target path is{remotePath}")
+        try:
+            logger.info("Downloading")
+            shutil.copy(source, to)
+            sftp.put(localDir + "/" + source.split("/")[-1], remotepath=remotePath)
+            os.remove(download_to + "/" + loc)
+
+        except FileNotFoundError as e:
+            logger.error(e)
+
+        sftp.close()
+
+
 def parseQueryResult(conn: mysql.connector.connection,
                      sql: str,
-                     target: str) -> list:
+                     target: str) -> defaultdict[Any, list]:
     if not conn:
         raise ConnectionError("Not connect to database")
 
-    fileLocations = []
+    # fileLocations = []
+    try:
+        os.mkdir(target)
+
+    except FileExistsError as e:
+        print(e)
+
+    '''Query database'''
     cursor = conn.cursor(buffered=True, dictionary=True)
     cursor.execute(sql)
     queryResult = cursor.fetchall()
     print(len(queryResult))
-    for dict_ in queryResult:
-        dest = target + "/" + dict_["ExternalID"]
-        try:
-            os.mkdir(dest)
 
-        except FileExistsError as e:
-            print(e)
-
+    # Parse the data returned by query
+    fileLocationDict = collections.defaultdict(list)
+    for dict_ in queryResult[:100]:
+        procedureDef = dict_["ProcedureDefinition"]
+        externalId = dict_["ExternalID"]
         pathToImage = dict_["OutputValue"].split("\\")
 
-        '''Remove empty string from list'''
-
-        if len(pathToImage) > 1:
-            if "Phenotype" in pathToImage:
-                #print(pathToImage)
-                startIndex = pathToImage.index("Phenotype")
-                imageLocation = pathToImage[startIndex:]
-                print(imageLocation)
-                fileLocations.append(os.path.join(*imageLocation))
-
-            if "phenotype" in pathToImage:
-                #print(pathToImage)
-                startIndex = pathToImage.index("phenotype")
-                imageLocation = pathToImage[startIndex:]
-                print(imageLocation)
-                fileLocations.append(os.path.join(*imageLocation))
-
-            else:
-                print(pathToImage)
-
-        else:
-            imageLocation = dict_["OutputValue"]
-            fileLocations.append(imageLocation)
-
-    print(len(fileLocations))
-    return fileLocations
-
-
-def download_from_drive(fileLocationMap: defaultdict[Any, list],
-                        source: str,
-                        target: str) -> None:
-    if not fileLocationMap or not source \
-            or not target:
-        raise ValueError()
-
-    for externalId, pairs in fileLocationMap.items():
         dest = target + "/" + externalId
         try:
             os.mkdir(dest)
@@ -140,17 +152,92 @@ def download_from_drive(fileLocationMap: defaultdict[Any, list],
         except FileExistsError as e:
             print(e)
 
-        """Start to download files from drive"""
-        for pair in pairs:
-            # print(pair)
-            if len(pair) == 3:
-                Dir, subDir, image = pair[0].replace(" ", ""), pair[1], pair[2]
-                # print(Dir)
-                print(pair[4])
-                rootDir = f"/Volumes/phenotype/{Dir}/KOMP/images/{subDir}"
-                print(os.listdir(rootDir))
+        """
+        Handle different scenario of file path:
+        1) Full path is entered, but there are some minor mistakes such as character, spelling etc
+        2) Only file name is entered, which requires to form the path to the file in the drive 
+        """
+
+        # Case 1)
+        if len(pathToImage) > 1:
+
+            if "Phenotype" in pathToImage:
+                # print(pathToImage)
+                startIndex = pathToImage.index("Phenotype")
+                imageLocation = pathToImage[startIndex:]
+                logger.debug(f"Case 1) location :{imageLocation}")
+                # Use this line if you are on a Mac/Linux machine
+                fileLocationDict[externalId].append(os.path.join(*imageLocation))
+
+                # Use this line if you are on a windows machine
+                # fileLocationDict[externalId].append(os.path.join(*imageLocation).replace("\\", "/"))
+
+            if "phenotype" in pathToImage:
+                # print(pathToImage)
+                startIndex = pathToImage.index("phenotype")
+                imageLocation = pathToImage[startIndex:]
+                logger.debug(f"Case 1) location :{imageLocation}")
+                # Use this line if you are on a Mac/Linux machine
+                fileLocationDict[externalId].append(os.path.join(*imageLocation))
+
+                # Use this line if you are on a windows machine
+                # fileLocationDict[externalId].append(os.path.join(*imageLocation).replace("\\", "/"))
             else:
-                continue
+                print(pathToImage)
+        # Case 2)
+        else:
+            imageLocation = os.path.join("phenotype", procedureDef, "KOMP",
+                                         "images", dict_["OutputValue"])
+
+            logger.debug(f"Case 2) location :{imageLocation}")
+            # If you are on Mac/Linux
+            fileLocationDict[externalId].append(imageLocation)
+
+            # If you are on windows
+            # fileLocationDict[externalId].append(imageLocation).replace("\\", "/")
+
+    # print(len(fileLocations))
+    return fileLocationDict
+
+
+"""
+Function for images from Phenotype drive and upload them into server
+"""
+
+
+def download_from_drive(fileLocationDict: defaultdict[list],
+                        source: str,
+                        target: str) -> None:
+    if not fileLocationDict or not source \
+            or not target:
+        raise ValueError()
+
+    for externalId, locations in fileLocationDict.items():
+        for loc in locations:
+            print(loc)
+            download_from = source + loc
+            logger.info(f"Download source is {download_from}")
+            download_to = target + "/" + externalId
+            logger.info(f"Download to {download_to}")
+
+            cnopts = pysftp.CnOpts()
+            cnopts.hostkeys = None
+            with pysftp.Connection(host="bhjlk01.jax.org", username="jlkinternal",
+                                   password="t1m3st4mp!", cnopts=cnopts) as sftp:
+                sftp.cwd("/srv/ftp/images/" + externalId)
+                # localPath = path + "/" + file
+                remotePath = "/srv/ftp/images/" + externalId + loc.split("/")[-1]
+                try:
+                    logger.info("Downloading")
+                    shutil.copy(download_from, download_to)
+                    sftp.put(download_to + "/" + loc, remotepath=remotePath)
+                    os.remove(download_to + "/" + loc)
+
+                except FileNotFoundError as e:
+                    logger.error(e)
+
+                sftp.close()
+                # shutil.copy(download_from, download_to)
 
 
 """
@@ -273,13 +360,14 @@ def main():
             fileList = os.listdir(path)
             cnopts = pysftp.CnOpts()
             cnopts.hostkeys = None
+            monkey.patch_all()
 
             for file in fileList:
                 with pysftp.Connection(host="bhjlk01.jax.org", username="jlkinternal",
                                        password="t1m3st4mp!", cnopts=cnopts) as sftp:
                     sftp.cwd("/srv/ftp/images/" + key)
                     localPath = path + "/" + file
-                    remotePath = "/srv/ftp/images/" + key
+                    remotePath = "/srv/ftp/images/" + key + "/" + file
                     sftp.put(localPath, remotePath)
 
                     sftp.close()
@@ -306,12 +394,16 @@ def main():
         sql = fptr.read()
         conn = db_init()
 
+        # targetPath = "C:/Program Files/KOMP/ImageDownload/KOMP_image_uploader/"
         targetPath = "/Users/chent/Desktop/KOMP_Project/KOMP_image_uploader/Phenotype"
         fileLocationMap = parseQueryResult(conn, sql, target=targetPath)
+        # print(fileLocations)
         # print(fileLocationMap)
 
-        srcPath = "/Volumes/phenotype/"
-        # download_from_drive(fileLocationMap, source=srcPath, target=targetPath)
+        # srcPath = "//bht2stor.jax.org/"
+        monkey.patch_all()
+        srcPath = "/Volumes/"
+        download_from_drive(fileLocationMap, source=srcPath, target=targetPath)
         '''
         fileLocationsMap = download_from_drive(conn)
         cursor = conn.cursor(buffered=True, dictionary=True)
